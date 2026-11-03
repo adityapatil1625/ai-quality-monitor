@@ -1,0 +1,1 @@
+-- Step 5: Glue/Athena DDL will be added here.

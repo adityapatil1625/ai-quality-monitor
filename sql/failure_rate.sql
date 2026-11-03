@@ -1,0 +1,1 @@
+-- Step 5: Daily failure rate query will be added here.

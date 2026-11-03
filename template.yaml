@@ -1,0 +1,162 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: ai-quality-monitor serverless pipeline scaffold
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: ai-quality-monitor
+  BedrockModelId:
+    Type: String
+    Default: amazon.titan-text-lite-v1
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Timeout: 30
+    MemorySize: 256
+    Tracing: Active
+    Environment:
+      Variables:
+        PROJECT_NAME: !Ref ProjectName
+        TRACE_BUCKET: !Ref TraceBucket
+        BEDROCK_MODEL_ID: !Ref BedrockModelId
+
+Resources:
+  TraceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${ProjectName}-${AWS::AccountId}-${AWS::Region}-traces
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: v1
+
+  AssistantFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-assistant-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: assistant-inline-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CreateLogGroup
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                Resource: '*'
+              - Sid: WriteFunctionLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-assistant*:*
+              - Sid: WriteTraceObjects
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${TraceBucket}/traces/*
+              - Sid: InvokeSingleBedrockModel
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}
+
+  AssistantFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-assistant
+      CodeUri: src/assistant_handler/
+      Handler: app.lambda_handler
+      Role: !GetAtt AssistantFunctionRole.Arn
+      Events:
+        AskApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /ask
+            Method: POST
+
+  ScorerFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-scorer-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: scorer-inline-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CreateLogGroup
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                Resource: '*'
+              - Sid: WriteFunctionLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-scorer*:*
+              - Sid: ReadTraceObjects
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${TraceBucket}/traces/*
+              - Sid: ListTracePrefix
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !Sub arn:${AWS::Partition}:s3:::${TraceBucket}
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - traces/*
+              - Sid: PublishQualityMetrics
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: AiQualityMonitor
+              - Sid: InvokeSingleBedrockModel
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}
+
+  ScorerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-scorer
+      CodeUri: src/scorer_handler/
+      Handler: app.lambda_handler
+      Role: !GetAtt ScorerFunctionRole.Arn
+
+Outputs:
+  ApiEndpoint:
+    Description: HTTP API endpoint for ask requests
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/v1/ask
+  TraceBucketName:
+    Description: S3 bucket storing redacted traces
+    Value: !Ref TraceBucket
+  AssistantFunctionName:
+    Value: !Ref AssistantFunction
+  ScorerFunctionName:
+    Value: !Ref ScorerFunction
